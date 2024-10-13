@@ -203,14 +203,13 @@ class committed_descriptor_impl {
     shared_spec_constants<Scalar> shared_constants;
   };
 
-  template <typename T>
   struct multi_kernel_implementation_plan {
     // SOA so all vectors should be the same length
     std::vector<detail::level> levels;
     std::vector<sycl::vector<kernel_ids>> kernel_ids; // TODO this isn't great, inner vec is a most size 2
-    std::vector<global_spec_constants> global_constants;
     std::vector<level_spec_constants> level_constants;
-    std::vector<shared_spec_constants<T>> shared_constants;
+    std::vector<shared_spec_constants<Scalar>> shared_constants;
+    global_spec_constants global_constants;
   };
 
 
@@ -242,7 +241,7 @@ class committed_descriptor_impl {
         /*apply_multiply_on_store=*/false,
         /*apply_conjugate_on_load=*/false,
         /*apply_conjugate_on_store=*/false,
-        /*apply_scale_factor=*/false,
+        /*apply_scale_factor=*/params.scale_factor != 1.0,
         /*storage=*/params.complex_storage,
         /*scale_factor=*/params.get_scale(dir),
         /*input_stride=*/params.get_strides(dir)[dim],
@@ -332,50 +331,61 @@ class committed_descriptor_impl {
     }
 
     // global
+    
+    multi_kernel_implementation_plan multi;
 
     PORTFFT_LOG_TRACE("Preparing global impl");
     // tuple is level, id, and factors
     std::vector<std::tuple<detail::level, std::vector<sycl::kernel_id>, std::vector<Idx>>> param_vec;
     auto check_and_select_target_level = [&](IdxGlobal factor_size, bool batch_interleaved_layout = true) -> bool {
       if (detail::fits_in_wi<Scalar>(factor_size)) {
+        const auto level_num = multi.levels.size();
+        multi.levels.push_back(detail::level::WORKITEM);
+        multi.ids.push_back(detail::get_ids<detail::global_kernel, Scalar, Domain, SubgroupSize>());
+        // TODO continue from here
         // Throughout we have assumed there would always be enough local memory for the WI implementation.
         param_vec.emplace_back(detail::level::WORKITEM,
-                               detail::get_ids<detail::global_kernel, Scalar, Domain, SubgroupSize>(),
+                               ,
                                std::vector<Idx>{static_cast<Idx>(factor_size)});
         PORTFFT_LOG_TRACE("Workitem kernel for factor:", factor_size);
         return true;
       }
-      bool fits_in_local_memory_subgroup = [&]() {
+
+      const bool fits_in_local_memory_subgroup = [&]() {
         Idx temp_num_sgs_in_wg;
         IdxGlobal factor_sg = detail::factorize_sg<IdxGlobal>(factor_size, SubgroupSize);
         IdxGlobal factor_wi = factor_size / factor_sg;
-        if (detail::can_cast_safely<IdxGlobal, Idx>(factor_sg) && detail::can_cast_safely<IdxGlobal, Idx>(factor_wi)) {
-          std::size_t input_scalars =
-              num_scalars_in_local_mem(detail::level::SUBGROUP, static_cast<std::size_t>(factor_size), SubgroupSize,
-                                       {static_cast<Idx>(factor_sg), static_cast<Idx>(factor_wi)}, temp_num_sgs_in_wg,
-                                       batch_interleaved_layout ? layout::BATCH_INTERLEAVED : layout::PACKED);
-          std::size_t store_modifiers = batch_interleaved_layout ? input_scalars : 0;
-          std::size_t twiddle_scalars = 2 * static_cast<std::size_t>(factor_size);
-          return (sizeof(Scalar) * (input_scalars + store_modifiers + twiddle_scalars)) <
-                 static_cast<std::size_t>(local_memory_size);
+        if (!(detail::can_cast_safely<IdxGlobal, Idx>(factor_sg) && detail::can_cast_safely<IdxGlobal, Idx>(factor_wi))) {
+          return false;
         }
-        return false;
+        std::size_t input_scalars =
+          num_scalars_in_local_mem(detail::level::SUBGROUP, static_cast<std::size_t>(factor_size), SubgroupSize,
+              {static_cast<Idx>(factor_sg), static_cast<Idx>(factor_wi)}, temp_num_sgs_in_wg,
+              batch_interleaved_layout ? layout::BATCH_INTERLEAVED : layout::PACKED);
+
+        std::size_t store_modifiers = batch_interleaved_layout ? input_scalars : 0;
+        std::size_t twiddle_scalars = 2 * static_cast<std::size_t>(factor_size);
+
+        return (sizeof(Scalar) * (input_scalars + store_modifiers + twiddle_scalars)) <
+          static_cast<std::size_t>(local_memory_size);
       }();
-      if (detail::fits_in_sg<Scalar>(factor_size, SubgroupSize) && fits_in_local_memory_subgroup &&
-          !PORTFFT_SLOW_SG_SHUFFLES) {
-        Idx factor_sg = detail::factorize_sg(static_cast<Idx>(factor_size), SubgroupSize);
-        Idx factor_wi = static_cast<Idx>(factor_size) / factor_sg;
-        PORTFFT_LOG_TRACE("Subgroup kernel for factor:", factor_size, "with factor_wi:", factor_wi,
-                          "and factor_sg:", factor_sg);
-        param_vec.emplace_back(detail::level::SUBGROUP,
-                               detail::get_ids<detail::global_kernel, Scalar, Domain, SubgroupSize>(),
-                               std::vector<Idx>{factor_sg, factor_wi});
-        return true;
+
+      if (!(detail::fits_in_sg<Scalar>(factor_size, SubgroupSize) && fits_in_local_memory_subgroup &&
+          !PORTFFT_SLOW_SG_SHUFFLES)) {
+        return false;
       }
-      return false;
+
+      Idx factor_sg = detail::factorize_sg(static_cast<Idx>(factor_size), SubgroupSize);
+      Idx factor_wi = static_cast<Idx>(factor_size) / factor_sg;
+      PORTFFT_LOG_TRACE("Subgroup kernel for factor:", factor_size, "with factor_wi:", factor_wi,
+          "and factor_sg:", factor_sg);
+      param_vec.emplace_back(detail::level::SUBGROUP,
+          detail::get_ids<detail::global_kernel, Scalar, Domain, SubgroupSize>(),
+          std::vector<Idx>{factor_sg, factor_wi});
+      return true;
     };
     detail::factorize_input(fft_size, check_and_select_target_level);
-    return {detail::level::GLOBAL, param_vec};
+    return {true, {.multi = {multi}};
   }
 
 
