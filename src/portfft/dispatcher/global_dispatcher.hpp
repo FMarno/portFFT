@@ -255,48 +255,6 @@ struct committed_descriptor_impl<Scalar, Domain>::calculate_twiddles_struct::inn
   }
 };
 
-template <typename Scalar, domain Domain>
-template <typename Dummy>
-struct committed_descriptor_impl<Scalar, Domain>::set_spec_constants_struct::inner<detail::level::GLOBAL, Dummy> {
-  static void execute(committed_descriptor_impl& /*desc*/, sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle,
-                      Idx length, const std::vector<Idx>& factors, detail::level level, Idx factor_num,
-                      Idx num_factors) {
-    PORTFFT_LOG_FUNCTION_ENTRY();
-    PORTFFT_LOG_TRACE("GlobalSubImplSpecConst:", level);
-    in_bundle.template set_specialization_constant<detail::GlobalSubImplSpecConst>(level);
-    PORTFFT_LOG_TRACE("GlobalSpecConstNumFactors:", num_factors);
-    in_bundle.template set_specialization_constant<detail::GlobalSpecConstNumFactors>(num_factors);
-    PORTFFT_LOG_TRACE("GlobalSpecConstLevelNum:", factor_num);
-    in_bundle.template set_specialization_constant<detail::GlobalSpecConstLevelNum>(factor_num);
-    if (level == detail::level::WORKITEM) {
-      PORTFFT_LOG_TRACE("SpecConstFftSize:", length);
-      in_bundle.template set_specialization_constant<detail::SpecConstFftSize>(length);
-      PORTFFT_LOG_TRACE("SpecConstWIScratchSize:", 2 * detail::wi_temps(length));
-      in_bundle.template set_specialization_constant<detail::SpecConstWIScratchSize>(2 * detail::wi_temps(length));
-      PORTFFT_LOG_TRACE("SpecConstNumRealsPerFFT:", 2 * length);
-      in_bundle.template set_specialization_constant<detail::SpecConstNumRealsPerFFT>(2 * length);
-    }
-    if (level == detail::level::WORKGROUP) {
-      auto num_cpx_in_private_mem = std::max(factors[1], factors[3]);
-      PORTFFT_LOG_TRACE("SpecConstFftSize:", length);
-      in_bundle.template set_specialization_constant<detail::SpecConstFftSize>(length);
-      PORTFFT_LOG_TRACE("SpecConstWIScratchSize:", 2 * detail::wi_temps(num_cpx_in_private_mem));
-      in_bundle.template set_specialization_constant<detail::SpecConstWIScratchSize>(
-          2 * detail::wi_temps(num_cpx_in_private_mem));
-      PORTFFT_LOG_TRACE("SpecConstNumRealsPerFFT:", 2 * num_cpx_in_private_mem);
-      in_bundle.template set_specialization_constant<detail::SpecConstNumRealsPerFFT>(2 * num_cpx_in_private_mem);
-    } else if (level == detail::level::SUBGROUP) {
-      PORTFFT_LOG_TRACE("SubgroupFactorWISpecConst:", factors[1]);
-      in_bundle.template set_specialization_constant<detail::SubgroupFactorWISpecConst>(factors[1]);
-      PORTFFT_LOG_TRACE("SubgroupFactorSGSpecConst:", factors[0]);
-      in_bundle.template set_specialization_constant<detail::SubgroupFactorSGSpecConst>(factors[0]);
-      PORTFFT_LOG_TRACE("SpecConstWIScratchSize:", 2 * detail::wi_temps(factors[1]));
-      in_bundle.template set_specialization_constant<detail::SpecConstWIScratchSize>(2 * detail::wi_temps(factors[1]));
-      PORTFFT_LOG_TRACE("SpecConstNumRealsPerFFT:", 2 * factors[1]);
-      in_bundle.template set_specialization_constant<detail::SpecConstNumRealsPerFFT>(2 * factors[1]);
-    }
-  }
-};
 
 template <typename Scalar, domain Domain>
 template <typename Dummy>

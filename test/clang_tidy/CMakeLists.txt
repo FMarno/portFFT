@@ -26,13 +26,17 @@
 # Clang-tidy needs to have a compilation data-base to work on, so we
 # need a dummy project.
 add_executable(clang_tidy_dummy clang_tidy_dummy.cpp)
-add_sycl_to_target(TARGET clang_tidy_dummy)
+#add_sycl_to_target(TARGET clang_tidy_dummy)
 target_link_libraries(
     clang_tidy_dummy
     PRIVATE
     portfft
     portfft_warnings
 )
+
+target_compile_options(clang_tidy_dummy PRIVATE -fsycl)
+target_link_options(clang_tidy_dummy PRIVATE -fsycl)
+
 
 # setup clang-tidy command from executable + options
 get_filename_component(CXX_COMPILER_DIR ${CMAKE_CXX_COMPILER} DIRECTORY)

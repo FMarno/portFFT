@@ -101,6 +101,7 @@ PORTFFT_INLINE void workitem_impl(const T* input, T* output, const T* input_imag
                                   IdxGlobal n_transforms, global_data_struct<1> global_data, sycl::kernel_handler& kh,
                                   const T* load_modifier_data = nullptr, const T* store_modifier_data = nullptr,
                                   T* loc_load_modifier = nullptr, T* loc_store_modifier = nullptr) {
+
   complex_storage storage = kh.get_specialization_constant<detail::SpecConstComplexStorage>();
   detail::elementwise_multiply multiply_on_load = kh.get_specialization_constant<detail::SpecConstMultiplyOnLoad>();
   detail::elementwise_multiply multiply_on_store = kh.get_specialization_constant<detail::SpecConstMultiplyOnStore>();
@@ -129,15 +130,8 @@ PORTFFT_INLINE void workitem_impl(const T* input, T* output, const T* input_imag
   const IdxGlobal input_distance_in_reals = interleaved_storage ? 2 * input_distance : input_distance;
   const IdxGlobal output_distance_in_reals = interleaved_storage ? 2 * output_distance : output_distance;
 
-#ifdef PORTFFT_USE_SCLA
-  T wi_private_scratch[detail::SpecConstWIScratchSize];
-  T priv_scla[detail::SpecConstNumRealsPerFFT];
-  // Decay the scla to T* to avoid assert when it is decayed to const T*
-  T* priv = priv_scla;
-#else
   T wi_private_scratch[2 * wi_temps(detail::MaxComplexPerWI)];
   T priv[2 * MaxComplexPerWI];
-#endif
   Idx subgroup_local_id = static_cast<Idx>(global_data.sg.get_local_linear_id());
   Idx subgroup_id = static_cast<Idx>(global_data.sg.get_group_id());
   Idx local_offset = n_reals * SubgroupSize * subgroup_id;
@@ -403,22 +397,6 @@ struct committed_descriptor_impl<Scalar, Domain>::run_kernel_struct<SubgroupSize
             global_data.log_message_global("Exiting workitem kernel");
           });
     });
-  }
-};
-
-template <typename Scalar, domain Domain>
-template <typename Dummy>
-struct committed_descriptor_impl<Scalar, Domain>::set_spec_constants_struct::inner<detail::level::WORKITEM, Dummy> {
-  static void execute(committed_descriptor_impl& /*desc*/, sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle,
-                      Idx length, const std::vector<Idx>& /*factors*/, detail::level /*level*/, Idx /*factor_num*/,
-                      Idx /*num_factors*/) {
-    PORTFFT_LOG_FUNCTION_ENTRY();
-    PORTFFT_LOG_TRACE("SpecConstFftSize:", length);
-    in_bundle.template set_specialization_constant<detail::SpecConstFftSize>(length);
-    PORTFFT_LOG_TRACE("SpecConstWIScratchSize:", 2 * detail::wi_temps(length));
-    in_bundle.template set_specialization_constant<detail::SpecConstWIScratchSize>(2 * detail::wi_temps(length));
-    PORTFFT_LOG_TRACE("SpecConstNumRealsPerFFT:", 2 * length);
-    in_bundle.template set_specialization_constant<detail::SpecConstNumRealsPerFFT>(2 * length);
   }
 };
 

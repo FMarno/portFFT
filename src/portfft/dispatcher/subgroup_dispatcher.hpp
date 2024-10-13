@@ -112,14 +112,9 @@ PORTFFT_INLINE void subgroup_impl(const T* input, T* output, const T* input_imag
                                  n_transforms);
   const Idx n_reals_per_wi = 2 * factor_wi;
 
-#ifdef PORTFFT_USE_SCLA
-  T wi_private_scratch[detail::SpecConstWIScratchSize];
-  T priv[detail::SpecConstNumRealsPerFFT];
-#else
   // zero initializing these arrays avoids a bug with the AMD backend
   T wi_private_scratch[2 * wi_temps(detail::MaxComplexPerWI)]{};
   T priv[2 * MaxComplexPerWI]{};
-#endif
   Idx local_size = static_cast<Idx>(global_data.it.get_local_range(0));
   Idx subgroup_local_id = static_cast<Idx>(global_data.sg.get_local_linear_id());
   Idx subgroup_id = static_cast<Idx>(global_data.sg.get_group_id());
@@ -750,24 +745,6 @@ struct committed_descriptor_impl<Scalar, Domain>::run_kernel_struct<SubgroupSize
             global_data.log_message_global("Exiting subgroup kernel");
           });
     });
-  }
-};
-
-template <typename Scalar, domain Domain>
-template <typename Dummy>
-struct committed_descriptor_impl<Scalar, Domain>::set_spec_constants_struct::inner<detail::level::SUBGROUP, Dummy> {
-  static void execute(committed_descriptor_impl& /*desc*/, sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle,
-                      Idx /*length*/, const std::vector<Idx>& factors, detail::level /*level*/, Idx /*factor_num*/,
-                      Idx /*num_factors*/) {
-    PORTFFT_LOG_FUNCTION_ENTRY();
-    PORTFFT_LOG_TRACE("SubgroupFactorWISpecConst:", factors[0]);
-    in_bundle.template set_specialization_constant<detail::SubgroupFactorWISpecConst>(factors[0]);
-    PORTFFT_LOG_TRACE("SubgroupFactorSGSpecConst:", factors[1]);
-    in_bundle.template set_specialization_constant<detail::SubgroupFactorSGSpecConst>(factors[1]);
-    PORTFFT_LOG_TRACE("SpecConstWIScratchSize:", 2 * detail::wi_temps(factors[0]));
-    in_bundle.template set_specialization_constant<detail::SpecConstWIScratchSize>(2 * detail::wi_temps(factors[0]));
-    PORTFFT_LOG_TRACE("SpecConstNumRealsPerFFT:", 2 * factors[0]);
-    in_bundle.template set_specialization_constant<detail::SpecConstNumRealsPerFFT>(2 * factors[0]);
   }
 };
 

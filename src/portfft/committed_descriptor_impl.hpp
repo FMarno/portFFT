@@ -103,8 +103,6 @@ class committed_descriptor_impl {
    * Vector containing the sub-implementation level, kernel_ids and factors for each factor that requires a separate
    * kernel.
    */
-  using kernel_ids_and_metadata_t =
-      std::vector<std::tuple<detail::level, std::vector<sycl::kernel_id>, std::vector<Idx>>>;
   descriptor<Scalar, Domain> params;
   sycl::queue queue;
   sycl::device dev;
@@ -112,7 +110,7 @@ class committed_descriptor_impl {
   Idx n_compute_units;
   std::vector<std::size_t> supported_sg_sizes;
   Idx local_memory_size;
-  IdxGlobal llc_size;
+  size_t llc_size;
   std::shared_ptr<Scalar> scratch_ptr_1;
   std::shared_ptr<Scalar> scratch_ptr_2;
   std::size_t scratch_space_required;
@@ -198,6 +196,63 @@ class committed_descriptor_impl {
     }
   }
 
+  struct single_kernel_implementation_plan {
+    detail::level level;
+    std::vector<kernel_id> kernel_ids;
+    level_spec_constants constants;
+    shared_spec_constants<Scalar> shared_constants;
+  };
+
+  template <typename T>
+  struct multi_kernel_implementation_plan {
+    // SOA so all vectors should be the same length
+    std::vector<detail::level> levels;
+    std::vector<sycl::vector<kernel_ids>> kernel_ids; // TODO this isn't great, inner vec is a most size 2
+    std::vector<global_spec_constants> global_constants;
+    std::vector<level_spec_constants> level_constants;
+    std::vector<shared_spec_constants<T>> shared_constants;
+  };
+
+
+  struct implementation_plan {
+    bool is_multi_level;
+    union kernel_implemenation_plan {
+      single_kernel_implementation_plan single;
+      multi_kernel_implementation_plan multi;
+    } plan;
+  };
+
+  shared_spec_constants<Scalar> get_single_dim_shared_spec_constants(direction dir, size_t dim) {
+      IdxGlobal forward_distance;
+      IdxGlobal backward_distance;
+      if (is_multi_dim) {
+        if (is_final_dim) {
+          forward_distance = length;
+          backward_distance = length;
+        } else {
+          forward_distance = 1;
+          backward_distance = 1;
+        }
+      } else {
+        forward_distance = static_cast<IdxGlobal>(params.forward_distance);
+        backward_distance = static_cast<IdxGlobal>(params.backward_distance);
+      }
+      return shared_spec_constants<Scalar>{
+        /*apply_multiply_on_load=*/false,
+        /*apply_multiply_on_store=*/false,
+        /*apply_conjugate_on_load=*/false,
+        /*apply_conjugate_on_store=*/false,
+        /*apply_scale_factor=*/false,
+        /*storage=*/params.complex_storage,
+        /*scale_factor=*/params.get_scale(dir),
+        /*input_stride=*/params.get_strides(dir)[dim],
+        /*output_stride=*/params.get_strides(inv(dir))[dim],
+        /*input_distance=*/ dir == direction::FORWARD ? forward_distance : backward_distance,
+        /*output_distance=*/ dir == direction::FORWARD ? backward_distance : forward_distance,
+      };
+  }
+
+
   /**
    * Prepares the implementation for the particular problem size. That includes factorizing it and getting ids for the
    * set of kernels that need to be JIT compiled.
@@ -208,35 +263,44 @@ class committed_descriptor_impl {
    * vector of kernel ids, factors
    */
   template <Idx SubgroupSize>
-  std::tuple<detail::level, kernel_ids_and_metadata_t> prepare_implementation(std::size_t kernel_num) {
+  implementation_plan prepare_implementation(std::size_t kernel_num, direction dir, size_t dim) {
     PORTFFT_LOG_FUNCTION_ENTRY();
     // TODO: check and support all the parameter values
     if constexpr (Domain != domain::COMPLEX) {
       throw unsupported_configuration("portFFT only supports complex to complex transforms");
     }
 
-    std::vector<sycl::kernel_id> ids;
-    std::vector<Idx> factors;
-    IdxGlobal fft_size = static_cast<IdxGlobal>(params.lengths[kernel_num]);
+    const bool is_final_dim = dim == (params.lengths.size() - 1);
+    const bool is_multi_dim = params.lengths.size() > 1;
+    const IdxGlobal fft_size = static_cast<IdxGlobal>(params.lengths[kernel_num]);
+
+    // workitem
+
     if (detail::fits_in_wi<Scalar>(fft_size)) {
-      ids = detail::get_ids<detail::workitem_kernel, Scalar, Domain, SubgroupSize>();
+      auto ids = detail::get_ids<detail::workitem_kernel, Scalar, Domain, SubgroupSize>();
       PORTFFT_LOG_TRACE("Prepared workitem impl for size: ", fft_size);
-      return {detail::level::WORKITEM, {{detail::level::WORKITEM, ids, factors}}};
+      return {false, {.single = {level::WORKITEM, ids, {.workitem = {fft_size}}, get_single_dim_shared_spec_constants(dir, dim)}};
     }
+
+    // subgroup
+    
     if (detail::fits_in_sg<Scalar>(fft_size, SubgroupSize)) {
-      Idx factor_sg = detail::factorize_sg(static_cast<Idx>(fft_size), SubgroupSize);
-      Idx factor_wi = static_cast<Idx>(fft_size) / factor_sg;
+      auto ids = detail::get_ids<detail::subgroup_kernel, Scalar, Domain, SubgroupSize>();
+
       // This factorization is duplicated in the dispatch logic on the device.
       // The CT and spec constant factors should match.
-      factors.push_back(factor_wi);
-      factors.push_back(factor_sg);
-      ids = detail::get_ids<detail::subgroup_kernel, Scalar, Domain, SubgroupSize>();
+      Idx factor_sg = detail::factorize_sg(static_cast<Idx>(fft_size), SubgroupSize);
+      Idx factor_wi = static_cast<Idx>(fft_size) / factor_sg;
       PORTFFT_LOG_TRACE("Prepared subgroup impl with factor_wi:", factor_wi, "and factor_sg:", factor_sg);
-      return {detail::level::SUBGROUP, {{detail::level::SUBGROUP, ids, factors}}};
+      return {false, {.single = {level::SUBGROUP, ids, {.subgroup = {factor_wi, factor_sg}}, get_single_dim_shared_spec_constants(dir, dim)}}};
     }
+    
+    // workgroup
+
     IdxGlobal n_idx_global = detail::factorize(fft_size);
     if (detail::can_cast_safely<IdxGlobal, Idx>(n_idx_global) &&
         detail::can_cast_safely<IdxGlobal, Idx>(fft_size / n_idx_global)) {
+
       if (n_idx_global == 1) {
         throw unsupported_configuration("FFT size ", fft_size, " : Large Prime sized FFT currently is unsupported");
       }
@@ -252,23 +316,25 @@ class committed_descriptor_impl {
                                    {factor_sg_n, factor_wi_n, factor_sg_m, factor_wi_m}, temp_num_sgs_in_wg,
                                    layout::PACKED) *
           sizeof(Scalar);
+
       // Checks for PACKED layout only at the moment, as the other layout will not be supported
       // by the global implementation. For such sizes, only PACKED layout will be supported
       if (detail::fits_in_wi<Scalar>(factor_wi_n) && detail::fits_in_wi<Scalar>(factor_wi_m) &&
           (local_memory_usage <= static_cast<std::size_t>(local_memory_size))) {
-        factors.push_back(factor_wi_n);
-        factors.push_back(factor_sg_n);
-        factors.push_back(factor_wi_m);
-        factors.push_back(factor_sg_m);
+       //std::vector<Idx> factors{factor_wi_n ,factor_sg_n ,factor_wi_m ,factor_sg_m};
         // This factorization of N and M is duplicated in the dispatch logic on the device.
         // The CT and spec constant factors should match.
-        ids = detail::get_ids<detail::workgroup_kernel, Scalar, Domain, SubgroupSize>();
+        auto ids = detail::get_ids<detail::workgroup_kernel, Scalar, Domain, SubgroupSize>();
         PORTFFT_LOG_TRACE("Prepared workgroup impl with factor_wi_n:", factor_wi_n, " factor_sg_n:", factor_sg_n,
                           " factor_wi_m:", factor_wi_m, " factor_sg_m:", factor_sg_m);
-        return {detail::level::WORKGROUP, {{detail::level::WORKGROUP, ids, factors}}};
+        return {false, {.single = {level::WORKGROUP, ids, {.workgroup = {fft_size}}, get_single_dim_shared_spec_constants(dir, dim)}}};
       }
     }
+
+    // global
+
     PORTFFT_LOG_TRACE("Preparing global impl");
+    // tuple is level, id, and factors
     std::vector<std::tuple<detail::level, std::vector<sycl::kernel_id>, std::vector<Idx>>> param_vec;
     auto check_and_select_target_level = [&](IdxGlobal factor_size, bool batch_interleaved_layout = true) -> bool {
       if (detail::fits_in_wi<Scalar>(factor_size)) {
@@ -312,70 +378,6 @@ class committed_descriptor_impl {
     return {detail::level::GLOBAL, param_vec};
   }
 
-  /**
-   * Struct for dispatching `set_spec_constants()` call.
-   */
-  struct set_spec_constants_struct {
-    // Dummy parameter is needed as only partial specializations are allowed without specializing the containing class
-    template <detail::level Lev, typename Dummy>
-    struct inner {
-      static void execute(committed_descriptor_impl& desc, sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle,
-                          std::size_t length, const std::vector<Idx>& factors, detail::level level, Idx factor_num,
-                          Idx num_factors);
-    };
-  };
-
-  /**
-   * Sets the implementation dependant specialization constant value
-   * @param top_level implementation to dispatch to
-   * @param in_bundle input kernel bundle to set spec constants for
-   * @param length length of the fft
-   * @param factors factors of the corresponsing length
-   * @param multiply_on_load Whether the input data is multiplied with some data array before fft computation
-   * @param multiply_on_store Whether the input data is multiplied with some data array after fft computation
-   * @param scale_factor_applied whether or not to multiply scale factor
-   * @param level sub implementation to run which will be set as a spec constant
-   * @param conjugate_on_load whether or not to take conjugate of the input
-   * @param conjugate_on_store whether or not to take conjugate of the output
-   * @param scale_factor Scale to be applied to the result
-   * @param factor_num factor number which is set as a spec constant
-   * @param num_factors total number of factors of the committed size, set as a spec constant
-   */
-  void set_spec_constants(detail::level top_level, sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle,
-                          Idx length, const std::vector<Idx>& factors, detail::elementwise_multiply multiply_on_load,
-                          detail::elementwise_multiply multiply_on_store,
-                          detail::apply_scale_factor scale_factor_applied, detail::level level,
-                          detail::complex_conjugate conjugate_on_load, detail::complex_conjugate conjugate_on_store,
-                          Scalar scale_factor, IdxGlobal input_stride, IdxGlobal output_stride,
-                          IdxGlobal input_distance, IdxGlobal output_distance, Idx factor_num = 0,
-                          Idx num_factors = 0) {
-    PORTFFT_LOG_FUNCTION_ENTRY();
-    // These spec constants are used in all implementations, so we set them here
-    PORTFFT_LOG_TRACE("Setting specialization constants:");
-    PORTFFT_LOG_TRACE("SpecConstComplexStorage:", params.complex_storage);
-    in_bundle.template set_specialization_constant<detail::SpecConstComplexStorage>(params.complex_storage);
-    PORTFFT_LOG_TRACE("SpecConstMultiplyOnLoad:", multiply_on_load);
-    in_bundle.template set_specialization_constant<detail::SpecConstMultiplyOnLoad>(multiply_on_load);
-    PORTFFT_LOG_TRACE("SpecConstMultiplyOnStore:", multiply_on_store);
-    in_bundle.template set_specialization_constant<detail::SpecConstMultiplyOnStore>(multiply_on_store);
-    PORTFFT_LOG_TRACE("SpecConstApplyScaleFactor:", scale_factor_applied);
-    in_bundle.template set_specialization_constant<detail::SpecConstApplyScaleFactor>(scale_factor_applied);
-    PORTFFT_LOG_TRACE("SpecConstConjugateOnLoad:", conjugate_on_load);
-    in_bundle.template set_specialization_constant<detail::SpecConstConjugateOnLoad>(conjugate_on_load);
-    PORTFFT_LOG_TRACE("SpecConstConjugateOnStore:", conjugate_on_store);
-    in_bundle.template set_specialization_constant<detail::SpecConstConjugateOnStore>(conjugate_on_store);
-    PORTFFT_LOG_TRACE("get_spec_constant_scale:", scale_factor);
-    in_bundle.template set_specialization_constant<detail::get_spec_constant_scale<Scalar>()>(scale_factor);
-    PORTFFT_LOG_TRACE("SpecConstInputStride:", input_stride);
-    in_bundle.template set_specialization_constant<detail::SpecConstInputStride>(input_stride);
-    PORTFFT_LOG_TRACE("SpecConstOutputStride:", output_stride);
-    in_bundle.template set_specialization_constant<detail::SpecConstOutputStride>(output_stride);
-    PORTFFT_LOG_TRACE("SpecConstInputDistance:", input_distance);
-    in_bundle.template set_specialization_constant<detail::SpecConstInputDistance>(input_distance);
-    PORTFFT_LOG_TRACE("SpecConstOutputDistance:", output_distance);
-    in_bundle.template set_specialization_constant<detail::SpecConstOutputDistance>(output_distance);
-    dispatch<set_spec_constants_struct>(top_level, in_bundle, length, factors, level, factor_num, num_factors);
-  }
 
   /**
    * Struct for dispatching `num_scalars_in_local_mem()` call.
@@ -600,7 +602,7 @@ class committed_descriptor_impl {
         sub_batches.push_back(kernel_data.batch_size);
       }
       dimensions.at(global_dimension).num_factors = static_cast<Idx>(factors.size());
-      std::size_t cache_space_left_for_batches = static_cast<std::size_t>(llc_size) - cache_required_for_twiddles;
+      std::size_t cache_space_left_for_batches = llc_size - cache_required_for_twiddles;
       // TODO: In case of multi-dim (single dim global sized), this should be batches corresponding to that dim
       dimensions.at(global_dimension).num_batches_in_l2 = static_cast<Idx>(std::min(
           static_cast<std::size_t>(PORTFFT_MAX_CONCURRENT_KERNELS),
@@ -722,7 +724,7 @@ class committed_descriptor_impl {
         n_compute_units(static_cast<Idx>(dev.get_info<sycl::info::device::max_compute_units>())),
         supported_sg_sizes(dev.get_info<sycl::info::device::sub_group_sizes>()),
         local_memory_size(static_cast<Idx>(queue.get_device().get_info<sycl::info::device::local_mem_size>())),
-        llc_size(static_cast<IdxGlobal>(queue.get_device().get_info<sycl::info::device::global_mem_cache_size>())) {
+        llc_size(queue.get_device().get_info<sycl::info::device::global_mem_cache_size>()) {
     PORTFFT_LOG_FUNCTION_ENTRY();
     PORTFFT_LOG_TRACE("Device info:");
     PORTFFT_LOG_TRACE("n_compute_units:", n_compute_units);

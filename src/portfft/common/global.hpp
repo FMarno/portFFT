@@ -168,6 +168,11 @@ PORTFFT_INLINE void dispatch_level(const Scalar* input, Scalar* output, const Sc
     sycl::group_barrier(global_data.it.get_group());
   }
 }
+struct transpose_level_spec_constants {
+  complex_storage storage;
+  Idx level_num;
+  Idx num_factors;
+};
 
 /**
  * Prepares the launch of transposition at a particular level

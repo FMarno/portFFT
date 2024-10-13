@@ -68,6 +68,7 @@ IdxGlobal get_global_size_workgroup(IdxGlobal n_transforms, Idx subgroup_size, I
                                                      divide_ceil(n_transforms, static_cast<IdxGlobal>(dfts_per_wg)));
 }
 
+
 /**
  * Implementation of FFT for sizes that can be done by a workgroup.
  *
@@ -108,13 +109,8 @@ PORTFFT_INLINE void workgroup_impl(const T* input, T* output, const T* input_ima
   const IdxGlobal input_distance = kh.get_specialization_constant<detail::SpecConstInputDistance>();
   const IdxGlobal output_distance = kh.get_specialization_constant<detail::SpecConstOutputDistance>();
 
-#ifdef PORTFFT_USE_SCLA
-  T wi_private_scratch[detail::SpecConstWIScratchSize];
-  T priv[detail::SpecConstNumRealsPerFFT];
-#else
   T wi_private_scratch[2 * wi_temps(detail::MaxComplexPerWI)];
   T priv[2 * MaxComplexPerWI];
-#endif
 
   const bool input_batch_interleaved = input_distance == 1;
   const bool output_batch_interleaved = output_distance == 1;
@@ -343,23 +339,6 @@ struct committed_descriptor_impl<Scalar, Domain>::run_kernel_struct<SubgroupSize
   }
 };
 
-template <typename Scalar, domain Domain>
-template <typename Dummy>
-struct committed_descriptor_impl<Scalar, Domain>::set_spec_constants_struct::inner<detail::level::WORKGROUP, Dummy> {
-  static void execute(committed_descriptor_impl& /*desc*/, sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle,
-                      Idx length, const std::vector<Idx>& factors, detail::level /*level*/, Idx /*factor_num*/,
-                      Idx /*num_factors*/) {
-    auto num_cpx_in_private_mem = std::max(factors[1], factors[3]);
-    PORTFFT_LOG_FUNCTION_ENTRY();
-    PORTFFT_LOG_TRACE("SpecConstFftSize:", length);
-    in_bundle.template set_specialization_constant<detail::SpecConstFftSize>(length);
-    PORTFFT_LOG_TRACE("SpecConstWIScratchSize:", 2 * detail::wi_temps(num_cpx_in_private_mem));
-    in_bundle.template set_specialization_constant<detail::SpecConstWIScratchSize>(
-        2 * detail::wi_temps(num_cpx_in_private_mem));
-    PORTFFT_LOG_TRACE("SpecConstNumRealsPerFFT:", 2 * num_cpx_in_private_mem);
-    in_bundle.template set_specialization_constant<detail::SpecConstNumRealsPerFFT>(2 * num_cpx_in_private_mem);
-  }
-};
 
 template <typename Scalar, domain Domain>
 template <typename Dummy>

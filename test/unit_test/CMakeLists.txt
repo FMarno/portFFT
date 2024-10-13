@@ -23,7 +23,7 @@
 # *
 # **************************************************************************/
 
-find_package(SYCL)
+#find_package(SYCL)
 
 # Get google test.
 include(FetchContent)
@@ -55,7 +55,7 @@ foreach(UNIT_TEST_FILE ${PORTFFT_UNIT_TESTS})
         ${TEST_TARGET}
         ${UNIT_TEST_FILE}
     )
-    add_sycl_to_target(TARGET ${TEST_TARGET})
+  #add_sycl_to_target(TARGET ${TEST_TARGET})
     target_link_libraries(
         ${TEST_TARGET}
         PRIVATE

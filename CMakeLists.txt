@@ -113,9 +113,10 @@ if(${PORTFFT_KERNEL_LOG})
   target_compile_definitions(portfft INTERFACE PORTFFT_KERNEL_LOG)
 endif()
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl")
 target_compile_options(portfft INTERFACE -fgpu-inline-threshold=1000000)
 target_link_options(portfft INTERFACE -fsycl-device-code-split=per_kernel)
-target_compile_options(portfft INTERFACE -fsycl-device-code-split=per_kernel)
+# target_compile_options(portfft INTERFACE -fsycl-device-code-split=per_kernel)
 
 include(CMakePackageConfigHelpers)
 set(version_file "${CMAKE_CURRENT_BINARY_DIR}/cmake/portfft-version.cmake")
