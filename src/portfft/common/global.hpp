@@ -139,10 +139,14 @@ PORTFFT_INLINE void dispatch_level(const Scalar* input, Scalar* output, const Sc
                                    const IdxGlobal* factors, const IdxGlobal* inner_batches,
                                    const IdxGlobal* inclusive_scan, IdxGlobal batch_size,
                                    detail::global_data_struct<1> global_data, sycl::kernel_handler& kh) {
-  complex_storage storage = kh.get_specialization_constant<detail::SpecConstComplexStorage>();
-  auto level = kh.get_specialization_constant<GlobalSubImplSpecConst>();
-  Idx level_num = kh.get_specialization_constant<GlobalSpecConstLevelNum>();
-  Idx num_factors = kh.get_specialization_constant<GlobalSpecConstNumFactors>();
+  const shared_spec_constants<Scalar> shared_constants =
+      kh.get_specialization_constant<detail::get_spec_constant_shared<Scalar>()>();
+  const complex_storage storage = shared_constants.storage;
+  const global_spec_constants global_constants = kh.get_specialization_constant<detail::SpecConstGlobal>();
+  const auto level = global_constants.level;
+  const Idx level_num = global_constants.level_num;
+  const Idx num_factors = global_constants.num_factors;
+
   global_data.log_message_global(__func__, "dispatching sub implementation for factor num = ", level_num);
   IdxGlobal outer_batch_product = get_outer_batch_product(inclusive_scan, num_factors, level_num);
   for (IdxGlobal iter_value = 0; iter_value < outer_batch_product; iter_value++) {
@@ -247,9 +251,10 @@ sycl::event transpose_level(const typename committed_descriptor_impl<Scalar, Dom
 #endif
                 it};
             global_data.log_message_global("entering transpose kernel - buffer impl");
-            complex_storage storage = kh.get_specialization_constant<detail::SpecConstComplexStorage>();
-            Idx level_num = kh.get_specialization_constant<GlobalSpecConstLevelNum>();
-            Idx num_factors = kh.get_specialization_constant<GlobalSpecConstNumFactors>();
+            const auto transpose_constants = kh.get_specialization_constant<detail::SpecConstTranspose>();
+            complex_storage storage = transpose_constants.storage;
+            Idx level_num = transpose_constants.level;
+            Idx num_factors = transpose_constants.num_factors;
             IdxGlobal outer_batch_product = get_outer_batch_product(inclusive_scan, num_factors, level_num);
             for (IdxGlobal iter_value = 0; iter_value < outer_batch_product; iter_value++) {
               global_data.log_message_subgroup("iter_value: ", iter_value);

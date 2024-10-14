@@ -198,7 +198,7 @@ class committed_descriptor_impl {
 
   struct single_kernel_implementation_plan {
     detail::level level;
-    std::vector<sycl::kernel_id> kernel_ids;
+    std::vector<sycl::kernel_id> kernel_ids; // TODO non-trivial delete function
     level_spec_constants constants;
     shared_spec_constants<Scalar> shared_constants;
   };
@@ -278,22 +278,23 @@ class committed_descriptor_impl {
    * vector of kernel ids, factors
    */
   template <Idx SubgroupSize>
-  implementation_plan prepare_implementation(std::size_t kernel_num, direction dir, size_t dim) {
+  implementation_plan prepare_implementation(direction dir, size_t dim) {
     PORTFFT_LOG_FUNCTION_ENTRY();
     // TODO: check and support all the parameter values
     if constexpr (Domain != domain::COMPLEX) {
       throw unsupported_configuration("portFFT only supports complex to complex transforms");
     }
 
-    const IdxGlobal fft_size = static_cast<IdxGlobal>(params.lengths[kernel_num]);
+    const IdxGlobal fft_size = static_cast<IdxGlobal>(params.lengths[dim]);
 
     // workitem
 
     if (detail::fits_in_wi<Scalar>(fft_size)) {
       auto ids = detail::get_ids<detail::workitem_kernel, Scalar, Domain, SubgroupSize>();
       PORTFFT_LOG_TRACE("Prepared workitem impl for size: ", fft_size);
-      return {false, single_kernel_implementation_plan{level::WORKITEM, ids, workitem_spec_constants{fft_size},
-                                                       get_non_global_shared_spec_constants(dir, dim)}};
+      workitem_spec_constants workitem_constants{static_cast<Idx>(fft_size)};
+      return {false, single_kernel_implementation_plan{
+                         level::WORKITEM, ids, {workitem_constants}, get_non_global_shared_spec_constants(dir, dim)}};
     }
 
     // subgroup
@@ -306,9 +307,10 @@ class committed_descriptor_impl {
       Idx factor_sg = detail::factorize_sg(static_cast<Idx>(fft_size), SubgroupSize);
       Idx factor_wi = static_cast<Idx>(fft_size) / factor_sg;
       PORTFFT_LOG_TRACE("Prepared subgroup impl with factor_wi:", factor_wi, "and factor_sg:", factor_sg);
-      return {false,
-              single_kernel_implementation_plan{level::SUBGROUP, ids, subgroup_spec_constants{factor_wi, factor_sg},
-                                                get_non_global_shared_spec_constants(dir, dim)}};
+      return {false, single_kernel_implementation_plan{level::SUBGROUP,
+                                                       ids,
+                                                       {subgroup_spec_constants{factor_wi, factor_sg}},
+                                                       get_non_global_shared_spec_constants(dir, dim)}};
     }
 
     // workgroup
@@ -342,7 +344,9 @@ class committed_descriptor_impl {
         auto ids = detail::get_ids<detail::workgroup_kernel, Scalar, Domain, SubgroupSize>();
         PORTFFT_LOG_TRACE("Prepared workgroup impl with factor_wi_n:", factor_wi_n, " factor_sg_n:", factor_sg_n,
                           " factor_wi_m:", factor_wi_m, " factor_sg_m:", factor_sg_m);
-        return {false, single_kernel_implementation_plan{level::WORKGROUP, ids, workitem_spec_constants{fft_size},
+        return {false, single_kernel_implementation_plan{level::WORKGROUP,
+                                                         ids,
+                                                         {workgroup_spec_constants{fft_size}},
                                                          get_non_global_shared_spec_constants(dir, dim)}};
       }
     }
@@ -505,8 +509,8 @@ class committed_descriptor_impl {
 
         try {
           PORTFFT_LOG_TRACE("Building kernel bundle with subgroup size", SubgroupSize);
-          result.emplace_back(sycl::build(in_bundle), factors, params.lengths[dim], SubgroupSize,
-                              PORTFFT_SGS_IN_WG, std::shared_ptr<Scalar>(), multi_plan.levels[i]);
+          result.emplace_back(sycl::build(in_bundle), factors, params.lengths[dim], SubgroupSize, PORTFFT_SGS_IN_WG,
+                              std::shared_ptr<Scalar>(), multi_plan.levels[i]);
           PORTFFT_LOG_TRACE("Kernel bundle build complete.");
         } catch (std::exception& e) {
           PORTFFT_LOG_WARNING("Build for subgroup size", SubgroupSize, "failed with message:\n", e.what());
@@ -560,9 +564,9 @@ class committed_descriptor_impl {
   dimension_struct build_w_spec_const(std::size_t dimension_num) {
     PORTFFT_LOG_FUNCTION_ENTRY();
     if (std::count(supported_sg_sizes.begin(), supported_sg_sizes.end(), SubgroupSize)) {
-      implementation_plan plan = prepare_implementation<SubgroupSize>(dimension_num);
+      implementation_plan plan = prepare_implementation<SubgroupSize>(direction::FORWARD, dimension_num);
       bool is_compatible = true;
-      if (plan.is_multi_level){
+      if (plan.is_multi_level) {
         for (auto ids : plan.plan.multi.kernel_ids) {
           is_compatible = is_compatible && sycl::is_compatible(ids, dev);
           if (!is_compatible) {
@@ -705,7 +709,8 @@ class committed_descriptor_impl {
             auto in_bundle = sycl::get_kernel_bundle<sycl::bundle_state::input>(
                 queue.get_context(), detail::get_transpose_kernel_ids<Scalar>());
             PORTFFT_LOG_TRACE("Setting specilization constants for transpose kernel", j);
-            set_transpose_spec_constants(in_bundle, transpose_spec_constants{params.complex_storage, i, factors.size()});
+            set_transpose_spec_constants(in_bundle,
+                                         transpose_spec_constants{params.complex_storage, i, factors.size()});
             dimensions.at(i).transpose_kernels.emplace_back(
                 sycl::build(in_bundle),
                 std::vector<Idx>{static_cast<Idx>(factors.at(j)), static_cast<Idx>(sub_batches.at(j))}, 1, 1, 1,
