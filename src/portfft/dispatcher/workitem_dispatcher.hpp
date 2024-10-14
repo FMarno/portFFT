@@ -101,21 +101,22 @@ PORTFFT_INLINE void workitem_impl(const T* input, T* output, const T* input_imag
                                   IdxGlobal n_transforms, global_data_struct<1> global_data, sycl::kernel_handler& kh,
                                   const T* load_modifier_data = nullptr, const T* store_modifier_data = nullptr,
                                   T* loc_load_modifier = nullptr, T* loc_store_modifier = nullptr) {
+  const shared_spec_constants<T> shared_constants =
+      kh.get_specialization_constant<detail::get_spec_constant_shared<T>()>();
+  const complex_storage storage = shared_constants.storage;
+  const detail::elementwise_multiply multiply_on_load = shared_constants.apply_multiply_on_load;
+  const detail::elementwise_multiply multiply_on_store = shared_constants.apply_multiply_on_store;
+  const detail::apply_scale_factor apply_scale_factor = shared_constants.apply_scale_factor;
+  const detail::complex_conjugate conjugate_on_load = shared_constants.apply_conjugate_on_load;
+  const detail::complex_conjugate conjugate_on_store = shared_constants.apply_conjugate_on_store;
+  const T scaling_factor = shared_constants.scale_factor;
+  const IdxGlobal input_stride = shared_constants.input_stride;
+  const IdxGlobal output_stride = shared_constants.output_stride;
+  const IdxGlobal input_distance = shared_constants.input_distance;
+  const IdxGlobal output_distance = shared_constants.output_distance;
 
-  complex_storage storage = kh.get_specialization_constant<detail::SpecConstComplexStorage>();
-  detail::elementwise_multiply multiply_on_load = kh.get_specialization_constant<detail::SpecConstMultiplyOnLoad>();
-  detail::elementwise_multiply multiply_on_store = kh.get_specialization_constant<detail::SpecConstMultiplyOnStore>();
-  detail::apply_scale_factor apply_scale_factor = kh.get_specialization_constant<detail::SpecConstApplyScaleFactor>();
-  detail::complex_conjugate conjugate_on_load = kh.get_specialization_constant<detail::SpecConstConjugateOnLoad>();
-  detail::complex_conjugate conjugate_on_store = kh.get_specialization_constant<detail::SpecConstConjugateOnStore>();
-
-  T scaling_factor = kh.get_specialization_constant<detail::get_spec_constant_scale<T>()>();
-
-  const Idx fft_size = kh.get_specialization_constant<detail::SpecConstFftSize>();
-  const IdxGlobal input_stride = kh.get_specialization_constant<detail::SpecConstInputStride>();
-  const IdxGlobal output_stride = kh.get_specialization_constant<detail::SpecConstOutputStride>();
-  const IdxGlobal input_distance = kh.get_specialization_constant<detail::SpecConstInputDistance>();
-  const IdxGlobal output_distance = kh.get_specialization_constant<detail::SpecConstOutputDistance>();
+  const workitem_spec_constants workitem_constants = kh.get_specialization_constant<detail::SpecConstWorkitem>();
+  const Idx fft_size = workitem_constants.fft_size;
 
   const bool is_packed_input = input_stride == 1 && input_distance == fft_size;
   const bool interleaved_transforms_input = input_distance < input_stride;

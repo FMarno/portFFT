@@ -25,6 +25,7 @@
 
 #include "defines.hpp"
 #include "enums.hpp"
+#include "common/logging.hpp"
 
 namespace portfft::detail {
 
@@ -52,7 +53,7 @@ constexpr static sycl::specialization_id<shared_spec_constants<double>> SpecCons
 
 template <typename T>
 void set_shared_spec_constants(sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle, shared_spec_constants<T> constants){
-    static_assert(std::is_trivially_copyable<shared_spec_constants<T>>);
+    static_assert(std::is_trivially_copyable_v<shared_spec_constants<T>>());
     PORTFFT_LOG_TRACE("Spec Constant multiply_on_load:", constants.multiply_on_load);
     PORTFFT_LOG_TRACE("Spec Constant multiply_on_store:", constants.multiply_on_store);
     PORTFFT_LOG_TRACE("Spec Constant apply_scale_factor:", constants.apply_scale_factor);
@@ -66,7 +67,7 @@ void set_shared_spec_constants(sycl::kernel_bundle<sycl::bundle_state::input>& i
     PORTFFT_LOG_TRACE("Spec Constant output stride:", constants.output_stride);
     PORTFFT_LOG_TRACE("Spec Constant input distance:", constants.input_distance);
     PORTFFT_LOG_TRACE("Spec Constant output distance:", constants.output_distance);
-    if constexpr (std:is_same<T, float>) {
+    if constexpr (std::is_same_v<T, float>) {
       in_bundle.template set_specialization_constant<SpecConstSharedFloat>(constants);
     } else {
       in_bundle.template set_specialization_constant<SpecConstSharedDouble>(constants);
@@ -80,7 +81,7 @@ struct workitem_spec_constants {
 constexpr static sycl::specialization_id<workitem_spec_constants> SpecConstWorkitem{};
 
 static inline void set_workitem_spec_constants(sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle, workitem_spec_constants constants) {
-    static_assert(std::is_trivially_copyable<workitem_spec_constants>);
+    static_assert(std::is_trivially_copyable_v<workitem_spec_constants>);
     PORTFFT_LOG_FUNCTION_ENTRY();
     PORTFFT_LOG_TRACE("Workitem Spec Constant fft_size:", constants.fft_size);
     in_bundle.template set_specialization_constant<SpecConstWorkitem>(constants);
@@ -94,21 +95,21 @@ struct subgroup_spec_constants {
 constexpr static sycl::specialization_id<subgroup_spec_constants> SpecConstSubgroup{};
 
 static inline void set_subgroup_spec_constants(sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle, subgroup_spec_constants constants) {
-    static_assert(std::is_trivially_copyable<subgroup_spec_constants);
+    static_assert(std::is_trivially_copyable_v<subgroup_spec_constants>);
     PORTFFT_LOG_FUNCTION_ENTRY();
-    PORTFFT_LOG_TRACE("Subgroup Spec Constant factor_wi:", constants.factor_wi;
+    PORTFFT_LOG_TRACE("Subgroup Spec Constant factor_wi:", constants.factor_wi);
     PORTFFT_LOG_TRACE("Subgroup Spec Constant factor_sg:", constants.factor_sg);
     in_bundle.template set_specialization_constant<SpecConstSubgroup>(constants);
 }
 
 struct workgroup_spec_constants {
-  const Idx fft_size;
+  const Idx fft_size{};
 };
 
 constexpr static sycl::specialization_id<workgroup_spec_constants> SpecConstWorkgroup{};
 
 void set_workgroup_spec_constants(sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle, workgroup_spec_constants constants) {
-    static_assert(std::is_trivially_copyable<workgroup_spec_constants);
+    static_assert(std::is_trivially_copyable_v<workgroup_spec_constants>);
     PORTFFT_LOG_FUNCTION_ENTRY();
     PORTFFT_LOG_TRACE("Workgroup Spec Constant fft_size:", constants.fft_size);
     in_bundle.template set_specialization_constant<SpecConstWorkgroup>(constants);
@@ -128,15 +129,12 @@ union level_spec_constants {
 
 constexpr static sycl::specialization_id<global_spec_constants> SpecConstGlobal{};
 
-template <typename T>
-using spec_constant_global = std::conditional_t<std::is_same_v<T, float>, global_spec_constants<float>, global_spec_constants<double>>;
-
 void set_global_spec_constants(sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle, global_spec_constants constants, detail::level level, level_spec_constants level_constants) {
-    static_assert(std::is_trivially_copyable<workgroup_spec_constants);
+    static_assert(std::is_trivially_copyable_v<workgroup_spec_constants>);
     PORTFFT_LOG_FUNCTION_ENTRY();
-    PORTFFT_LOG_TRACE("global Spec Constant fft_size:", constants.fft_size);
-    PORTFFT_LOG_TRACE("global Spec Constant fft_size:", constants.fft_size);
-    PORTFFT_LOG_TRACE("global Spec Constant fft_size:", constants.fft_size);
+    PORTFFT_LOG_TRACE("global Spec Constant level:", constants.level);
+    PORTFFT_LOG_TRACE("global Spec Constant level_num:", constants.level_num);
+    PORTFFT_LOG_TRACE("global Spec Constant num_factors:", constants.num_factors);
     in_bundle.template set_specialization_constant<SpecConstGlobal>(constants);
     if (level == level::WORKITEM){
       set_workitem_spec_constants(in_bundle, level_constants.workitem);
@@ -145,6 +143,23 @@ void set_global_spec_constants(sycl::kernel_bundle<sycl::bundle_state::input>& i
     } else if (level == level::WORKGROUP) {
       set_workgroup_spec_constants(in_bundle, level_constants.workgroup);
     }
+}
+
+struct transpose_spec_constants {
+  portfft::complex_storage storage;
+  Idx level;
+  Idx num_factors;
+};
+
+constexpr static sycl::specialization_id<transpose_spec_constants> SpecConstTranspose{};
+
+void set_transpose_spec_constants(sycl::kernel_bundle<sycl::bundle_state::input>& in_bundle, transpose_spec_constants constants) {
+    static_assert(std::is_trivially_copyable_v<transpose_spec_constants>);
+    PORTFFT_LOG_FUNCTION_ENTRY();
+    PORTFFT_LOG_TRACE("Transpose Spec Constant storage:", constants.storage);
+    PORTFFT_LOG_TRACE("Transpose Spec Constant level:", constants.level);
+    PORTFFT_LOG_TRACE("Transpose Spec Constant num_factors:", constants.num_factors);
+    in_bundle.template set_specialization_constant<SpecConstTranspose>(constants);
 }
 
 }  // namespace portfft::detail

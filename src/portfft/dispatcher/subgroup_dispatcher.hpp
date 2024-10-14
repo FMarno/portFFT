@@ -88,25 +88,23 @@ PORTFFT_INLINE void subgroup_impl(const T* input, T* output, const T* input_imag
                                   global_data_struct<1> global_data, sycl::kernel_handler& kh,
                                   const T* load_modifier_data = nullptr, const T* store_modifier_data = nullptr,
                                   T* loc_load_modifier = nullptr, T* loc_store_modifier = nullptr) {
-  const complex_storage storage = kh.get_specialization_constant<detail::SpecConstComplexStorage>();
-  const detail::elementwise_multiply multiply_on_load =
-      kh.get_specialization_constant<detail::SpecConstMultiplyOnLoad>();
-  const detail::elementwise_multiply multiply_on_store =
-      kh.get_specialization_constant<detail::SpecConstMultiplyOnStore>();
-  const detail::apply_scale_factor apply_scale_factor =
-      kh.get_specialization_constant<detail::SpecConstApplyScaleFactor>();
-  const detail::complex_conjugate conjugate_on_load =
-      kh.get_specialization_constant<detail::SpecConstConjugateOnLoad>();
-  const detail::complex_conjugate conjugate_on_store =
-      kh.get_specialization_constant<detail::SpecConstConjugateOnStore>();
-  const T scaling_factor = kh.get_specialization_constant<detail::get_spec_constant_scale<T>()>();
+  const shared_spec_constants<T> shared_constants =
+      kh.get_specialization_constant<detail::get_spec_constant_shared<T>()>();
+  const complex_storage storage = shared_constants.storage;
+  const detail::elementwise_multiply multiply_on_load = shared_constants.apply_multiply_on_load;
+  const detail::elementwise_multiply multiply_on_store = shared_constants.apply_multiply_on_store;
+  const detail::apply_scale_factor apply_scale_factor = shared_constants.apply_scale_factor;
+  const detail::complex_conjugate conjugate_on_load = shared_constants.apply_conjugate_on_load;
+  const detail::complex_conjugate conjugate_on_store = shared_constants.apply_conjugate_on_store;
+  const T scaling_factor = shared_constants.scale_factor;
+  const IdxGlobal input_stride = shared_constants.input_stride;
+  const IdxGlobal output_stride = shared_constants.output_stride;
+  const IdxGlobal input_distance = shared_constants.input_distance;
+  const IdxGlobal output_distance = shared_constants.output_distance;
 
-  const Idx factor_wi = kh.get_specialization_constant<SubgroupFactorWISpecConst>();
-  const Idx factor_sg = kh.get_specialization_constant<SubgroupFactorSGSpecConst>();
-  const IdxGlobal input_stride = kh.get_specialization_constant<detail::SpecConstInputStride>();
-  const IdxGlobal output_stride = kh.get_specialization_constant<detail::SpecConstOutputStride>();
-  const IdxGlobal input_distance = kh.get_specialization_constant<detail::SpecConstInputDistance>();
-  const IdxGlobal output_distance = kh.get_specialization_constant<detail::SpecConstOutputDistance>();
+  const subgroup_spec_constants subgroup_constants = kh.get_specialization_constant<SpecConstSubgroup>();
+  const Idx factor_wi = subgroup_constants.factor_wi;
+  const Idx factor_sg = subgroup_constants.factor_sg;
 
   global_data.log_message_global(__func__, "entered", "FactorWI", factor_wi, "FactorSG", factor_sg, "n_transforms",
                                  n_transforms);

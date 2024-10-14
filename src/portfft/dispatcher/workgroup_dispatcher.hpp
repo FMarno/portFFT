@@ -97,17 +97,20 @@ PORTFFT_INLINE void workgroup_impl(const T* input, T* output, const T* input_ima
                                    T* loc_twiddles, IdxGlobal n_transforms, const T* twiddles,
                                    global_data_struct<1> global_data, sycl::kernel_handler& kh,
                                    const T* load_modifier_data = nullptr, const T* store_modifier_data = nullptr) {
-  complex_storage storage = kh.get_specialization_constant<detail::SpecConstComplexStorage>();
-  detail::elementwise_multiply multiply_on_load = kh.get_specialization_constant<detail::SpecConstMultiplyOnLoad>();
-  detail::elementwise_multiply multiply_on_store = kh.get_specialization_constant<detail::SpecConstMultiplyOnStore>();
-  detail::apply_scale_factor apply_scale_factor = kh.get_specialization_constant<detail::SpecConstApplyScaleFactor>();
-  detail::complex_conjugate conjugate_on_load = kh.get_specialization_constant<detail::SpecConstConjugateOnLoad>();
-  detail::complex_conjugate conjugate_on_store = kh.get_specialization_constant<detail::SpecConstConjugateOnStore>();
-  T scaling_factor = kh.get_specialization_constant<detail::get_spec_constant_scale<T>()>();
+  const shared_spec_constants<T> shared_constants =
+      kh.get_specialization_constant<detail::get_spec_constant_shared<T>()>();
+  const complex_storage storage = shared_constants.storage;
+  const detail::elementwise_multiply multiply_on_load = shared_constants.apply_multiply_on_load;
+  const detail::elementwise_multiply multiply_on_store = shared_constants.apply_multiply_on_store;
+  const detail::apply_scale_factor apply_scale_factor = shared_constants.apply_scale_factor;
+  const detail::complex_conjugate conjugate_on_load = shared_constants.apply_conjugate_on_load;
+  const detail::complex_conjugate conjugate_on_store = shared_constants.apply_conjugate_on_store;
+  const T scaling_factor = shared_constants.scale_factor;
+  const IdxGlobal input_distance = shared_constants.input_distance;
+  const IdxGlobal output_distance = shared_constants.output_distance;
 
-  const Idx fft_size = kh.get_specialization_constant<detail::SpecConstFftSize>();
-  const IdxGlobal input_distance = kh.get_specialization_constant<detail::SpecConstInputDistance>();
-  const IdxGlobal output_distance = kh.get_specialization_constant<detail::SpecConstOutputDistance>();
+  const workgroup_spec_constants workgroup_constants = kh.get_specialization_constant<detail::SpecConstWorkgroup>();
+  const Idx fft_size = workgroup_constants.fft_size;
 
   T wi_private_scratch[2 * wi_temps(detail::MaxComplexPerWI)];
   T priv[2 * MaxComplexPerWI];

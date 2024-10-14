@@ -198,7 +198,7 @@ class committed_descriptor_impl {
 
   struct single_kernel_implementation_plan {
     detail::level level;
-    std::vector<kernel_id> kernel_ids;
+    std::vector<sycl::kernel_id> kernel_ids;
     level_spec_constants constants;
     shared_spec_constants<Scalar> shared_constants;
   };
@@ -206,12 +206,11 @@ class committed_descriptor_impl {
   struct multi_kernel_implementation_plan {
     // SOA so all vectors should be the same length
     std::vector<detail::level> levels;
-    std::vector<sycl::vector<kernel_ids>> kernel_ids; // TODO this isn't great, inner vec is a most size 2
+    std::vector<std::vector<sycl::kernel_id>> kernel_ids;  // TODO this isn't great, inner vec is a most size 2
     std::vector<level_spec_constants> level_constants;
     std::vector<shared_spec_constants<Scalar>> shared_constants;
     global_spec_constants global_constants;
   };
-
 
   struct implementation_plan {
     bool is_multi_level;
@@ -221,36 +220,53 @@ class committed_descriptor_impl {
     } plan;
   };
 
-  shared_spec_constants<Scalar> get_single_dim_shared_spec_constants(direction dir, size_t dim) {
-      IdxGlobal forward_distance;
-      IdxGlobal backward_distance;
-      if (is_multi_dim) {
-        if (is_final_dim) {
-          forward_distance = length;
-          backward_distance = length;
-        } else {
-          forward_distance = 1;
-          backward_distance = 1;
-        }
+  shared_spec_constants<Scalar> get_non_global_shared_spec_constants(direction dir, size_t dim) {
+    IdxGlobal forward_distance;
+    IdxGlobal backward_distance;
+    const bool is_multi_dim = params.lengths.size() > 1;
+    const bool is_final_dim = dim == (params.lengths.size() - 1);
+    if (is_multi_dim) {
+      if (is_final_dim) {
+        forward_distance = params.lengths[dim];
+        backward_distance = params.lengths[dim];
       } else {
-        forward_distance = static_cast<IdxGlobal>(params.forward_distance);
-        backward_distance = static_cast<IdxGlobal>(params.backward_distance);
+        forward_distance = 1;
+        backward_distance = 1;
       }
-      return shared_spec_constants<Scalar>{
+    } else {
+      forward_distance = static_cast<IdxGlobal>(params.forward_distance);
+      backward_distance = static_cast<IdxGlobal>(params.backward_distance);
+    }
+    return shared_spec_constants<Scalar>{
         /*apply_multiply_on_load=*/false,
         /*apply_multiply_on_store=*/false,
-        /*apply_conjugate_on_load=*/false,
-        /*apply_conjugate_on_store=*/false,
+        /*apply_conjugate_on_load=*/false,   // TODO only for backward fft
+        /*apply_conjugate_on_store=*/false,  // TODO only for backward fft
         /*apply_scale_factor=*/params.scale_factor != 1.0,
         /*storage=*/params.complex_storage,
         /*scale_factor=*/params.get_scale(dir),
         /*input_stride=*/params.get_strides(dir)[dim],
         /*output_stride=*/params.get_strides(inv(dir))[dim],
-        /*input_distance=*/ dir == direction::FORWARD ? forward_distance : backward_distance,
-        /*output_distance=*/ dir == direction::FORWARD ? backward_distance : forward_distance,
-      };
+        /*input_distance=*/dir == direction::FORWARD ? forward_distance : backward_distance,
+        /*output_distance=*/dir == direction::FORWARD ? backward_distance : forward_distance,
+    };
   }
 
+  shared_spec_constants<Scalar> get_global_shared_spec_constants(direction dir, IdxGlobal stride) {
+    return shared_spec_constants<Scalar>{
+        /*apply_multiply_on_load=*/false,
+        /*apply_multiply_on_store=*/true,
+        /*apply_conjugate_on_load=*/false,   // TODO only for backward fft
+        /*apply_conjugate_on_store=*/false,  // TODO only for backward fft
+        /*apply_scale_factor=*/false,        // only true for final factor
+        /*storage=*/params.complex_storage,
+        /*scale_factor=*/params.get_scale(dir),
+        /*input_stride=*/stride,
+        /*output_stride=*/stride,
+        /*input_distance=*/1,   // will be different for final factor
+        /*output_distance=*/1,  // will be different for final factor
+    };
+  }
 
   /**
    * Prepares the implementation for the particular problem size. That includes factorizing it and getting ids for the
@@ -269,8 +285,6 @@ class committed_descriptor_impl {
       throw unsupported_configuration("portFFT only supports complex to complex transforms");
     }
 
-    const bool is_final_dim = dim == (params.lengths.size() - 1);
-    const bool is_multi_dim = params.lengths.size() > 1;
     const IdxGlobal fft_size = static_cast<IdxGlobal>(params.lengths[kernel_num]);
 
     // workitem
@@ -278,11 +292,12 @@ class committed_descriptor_impl {
     if (detail::fits_in_wi<Scalar>(fft_size)) {
       auto ids = detail::get_ids<detail::workitem_kernel, Scalar, Domain, SubgroupSize>();
       PORTFFT_LOG_TRACE("Prepared workitem impl for size: ", fft_size);
-      return {false, {.single = {level::WORKITEM, ids, {.workitem = {fft_size}}, get_single_dim_shared_spec_constants(dir, dim)}};
+      return {false, single_kernel_implementation_plan{level::WORKITEM, ids, workitem_spec_constants{fft_size},
+                                                       get_non_global_shared_spec_constants(dir, dim)}};
     }
 
     // subgroup
-    
+
     if (detail::fits_in_sg<Scalar>(fft_size, SubgroupSize)) {
       auto ids = detail::get_ids<detail::subgroup_kernel, Scalar, Domain, SubgroupSize>();
 
@@ -291,15 +306,16 @@ class committed_descriptor_impl {
       Idx factor_sg = detail::factorize_sg(static_cast<Idx>(fft_size), SubgroupSize);
       Idx factor_wi = static_cast<Idx>(fft_size) / factor_sg;
       PORTFFT_LOG_TRACE("Prepared subgroup impl with factor_wi:", factor_wi, "and factor_sg:", factor_sg);
-      return {false, {.single = {level::SUBGROUP, ids, {.subgroup = {factor_wi, factor_sg}}, get_single_dim_shared_spec_constants(dir, dim)}}};
+      return {false,
+              single_kernel_implementation_plan{level::SUBGROUP, ids, subgroup_spec_constants{factor_wi, factor_sg},
+                                                get_non_global_shared_spec_constants(dir, dim)}};
     }
-    
+
     // workgroup
 
     IdxGlobal n_idx_global = detail::factorize(fft_size);
     if (detail::can_cast_safely<IdxGlobal, Idx>(n_idx_global) &&
         detail::can_cast_safely<IdxGlobal, Idx>(fft_size / n_idx_global)) {
-
       if (n_idx_global == 1) {
         throw unsupported_configuration("FFT size ", fft_size, " : Large Prime sized FFT currently is unsupported");
       }
@@ -320,33 +336,36 @@ class committed_descriptor_impl {
       // by the global implementation. For such sizes, only PACKED layout will be supported
       if (detail::fits_in_wi<Scalar>(factor_wi_n) && detail::fits_in_wi<Scalar>(factor_wi_m) &&
           (local_memory_usage <= static_cast<std::size_t>(local_memory_size))) {
-       //std::vector<Idx> factors{factor_wi_n ,factor_sg_n ,factor_wi_m ,factor_sg_m};
-        // This factorization of N and M is duplicated in the dispatch logic on the device.
-        // The CT and spec constant factors should match.
+        // std::vector<Idx> factors{factor_wi_n ,factor_sg_n ,factor_wi_m ,factor_sg_m};
+        //  This factorization of N and M is duplicated in the dispatch logic on the device.
+        //  The CT and spec constant factors should match.
         auto ids = detail::get_ids<detail::workgroup_kernel, Scalar, Domain, SubgroupSize>();
         PORTFFT_LOG_TRACE("Prepared workgroup impl with factor_wi_n:", factor_wi_n, " factor_sg_n:", factor_sg_n,
                           " factor_wi_m:", factor_wi_m, " factor_sg_m:", factor_sg_m);
-        return {false, {.single = {level::WORKGROUP, ids, {.workgroup = {fft_size}}, get_single_dim_shared_spec_constants(dir, dim)}}};
+        return {false, single_kernel_implementation_plan{level::WORKGROUP, ids, workitem_spec_constants{fft_size},
+                                                         get_non_global_shared_spec_constants(dir, dim)}};
       }
     }
 
     // global
-    
+
     multi_kernel_implementation_plan multi;
+
+    // forgive me for these sins
+    IdxGlobal remaining_factors_prod = static_cast<IdxGlobal>(params.get_flattened_length());
 
     PORTFFT_LOG_TRACE("Preparing global impl");
     // tuple is level, id, and factors
     std::vector<std::tuple<detail::level, std::vector<sycl::kernel_id>, std::vector<Idx>>> param_vec;
     auto check_and_select_target_level = [&](IdxGlobal factor_size, bool batch_interleaved_layout = true) -> bool {
+      // assume this is not the final level for now
       if (detail::fits_in_wi<Scalar>(factor_size)) {
-        const auto level_num = multi.levels.size();
         multi.levels.push_back(detail::level::WORKITEM);
-        multi.ids.push_back(detail::get_ids<detail::global_kernel, Scalar, Domain, SubgroupSize>());
-        // TODO continue from here
+        multi.kernel_ids.push_back(detail::get_ids<detail::global_kernel, Scalar, Domain, SubgroupSize>());
+        multi.level_constants.push_back(workitem_spec_constants{static_cast<Idx>(factor_size)});
+        remaining_factors_prod /= factor_size;
+        multi.shared_constants.push_back(get_global_shared_spec_constants(dir, remaining_factors_prod));
         // Throughout we have assumed there would always be enough local memory for the WI implementation.
-        param_vec.emplace_back(detail::level::WORKITEM,
-                               ,
-                               std::vector<Idx>{static_cast<Idx>(factor_size)});
         PORTFFT_LOG_TRACE("Workitem kernel for factor:", factor_size);
         return true;
       }
@@ -355,39 +374,42 @@ class committed_descriptor_impl {
         Idx temp_num_sgs_in_wg;
         IdxGlobal factor_sg = detail::factorize_sg<IdxGlobal>(factor_size, SubgroupSize);
         IdxGlobal factor_wi = factor_size / factor_sg;
-        if (!(detail::can_cast_safely<IdxGlobal, Idx>(factor_sg) && detail::can_cast_safely<IdxGlobal, Idx>(factor_wi))) {
+        if (!(detail::can_cast_safely<IdxGlobal, Idx>(factor_sg) &&
+              detail::can_cast_safely<IdxGlobal, Idx>(factor_wi))) {
           return false;
         }
         std::size_t input_scalars =
-          num_scalars_in_local_mem(detail::level::SUBGROUP, static_cast<std::size_t>(factor_size), SubgroupSize,
-              {static_cast<Idx>(factor_sg), static_cast<Idx>(factor_wi)}, temp_num_sgs_in_wg,
-              batch_interleaved_layout ? layout::BATCH_INTERLEAVED : layout::PACKED);
+            num_scalars_in_local_mem(detail::level::SUBGROUP, static_cast<std::size_t>(factor_size), SubgroupSize,
+                                     {static_cast<Idx>(factor_sg), static_cast<Idx>(factor_wi)}, temp_num_sgs_in_wg,
+                                     batch_interleaved_layout ? layout::BATCH_INTERLEAVED : layout::PACKED);
 
         std::size_t store_modifiers = batch_interleaved_layout ? input_scalars : 0;
         std::size_t twiddle_scalars = 2 * static_cast<std::size_t>(factor_size);
 
         return (sizeof(Scalar) * (input_scalars + store_modifiers + twiddle_scalars)) <
-          static_cast<std::size_t>(local_memory_size);
+               static_cast<std::size_t>(local_memory_size);
       }();
 
       if (!(detail::fits_in_sg<Scalar>(factor_size, SubgroupSize) && fits_in_local_memory_subgroup &&
-          !PORTFFT_SLOW_SG_SHUFFLES)) {
+            !PORTFFT_SLOW_SG_SHUFFLES)) {
         return false;
       }
 
       Idx factor_sg = detail::factorize_sg(static_cast<Idx>(factor_size), SubgroupSize);
       Idx factor_wi = static_cast<Idx>(factor_size) / factor_sg;
       PORTFFT_LOG_TRACE("Subgroup kernel for factor:", factor_size, "with factor_wi:", factor_wi,
-          "and factor_sg:", factor_sg);
-      param_vec.emplace_back(detail::level::SUBGROUP,
-          detail::get_ids<detail::global_kernel, Scalar, Domain, SubgroupSize>(),
-          std::vector<Idx>{factor_sg, factor_wi});
+                        "and factor_sg:", factor_sg);
+
+      multi.levels.push_back(detail::level::SUBGROUP);
+      multi.kernel_ids.push_back(detail::get_ids<detail::global_kernel, Scalar, Domain, SubgroupSize>());
+      multi.level_constants.push_back(subgroup_spec_constants{factor_sg, factor_wi});
+      remaining_factors_prod /= factor_size;
+      multi.shared_constants.push_back(get_global_shared_spec_constants(dir, remaining_factors_prod));
       return true;
     };
     detail::factorize_input(fft_size, check_and_select_target_level);
-    return {true, {.multi = {multi}};
+    return {true, multi};
   }
-
 
   /**
    * Struct for dispatching `num_scalars_in_local_mem()` call.
@@ -458,89 +480,70 @@ class committed_descriptor_impl {
    * @return vector of kernel_data_struct if all kernel builds are successful, std::nullopt otherwise
    */
   template <Idx SubgroupSize>
-  std::optional<std::vector<kernel_data_struct>> set_spec_constants_driver(detail::level top_level,
-                                                                           kernel_ids_and_metadata_t& prepared_vec,
-                                                                           direction compute_direction,
-                                                                           std::size_t dimension_num) {
-    Scalar scale_factor = compute_direction == direction::FORWARD ? params.forward_scale : params.backward_scale;
-    std::size_t counter = 0;
-    IdxGlobal remaining_factors_prod = static_cast<IdxGlobal>(params.get_flattened_length());
-    std::vector<kernel_data_struct> result;
-    for (auto [level, ids, factors] : prepared_vec) {
-      const bool is_multi_dim = params.lengths.size() > 1;
-      const bool is_global = top_level == detail::level::GLOBAL;
-      const bool is_final_factor = counter == (prepared_vec.size() - 1);
-      const bool is_final_dim = dimension_num == (params.lengths.size() - 1);
-      const bool is_backward = compute_direction == direction::BACKWARD;
-      if (is_multi_dim && is_global) {
-        throw unsupported_configuration("multidimensional global transforms are not supported.");
-      }
+  std::optional<std::vector<kernel_data_struct>> set_spec_constants_driver(implementation_plan& plan, size_t dim) {
+    if (plan.is_multi_level) {
+      multi_kernel_implementation_plan& multi_plan = plan.plan.multi;
+      std::vector<kernel_data_struct> result;
+      for (int i = 0; i != multi_plan.levels.size(); i += 1) {
+        auto in_bundle =
+            sycl::get_kernel_bundle<sycl::bundle_state::input>(queue.get_context(), multi_plan.kernel_ids[i]);
 
-      const auto multiply_on_store = is_global && !is_final_factor ? detail::elementwise_multiply::APPLIED
-                                                                   : detail::elementwise_multiply::NOT_APPLIED;
-      const auto conjugate_on_load =
-          is_backward && counter == 0 ? detail::complex_conjugate::APPLIED : detail::complex_conjugate::NOT_APPLIED;
-      const auto conjugate_on_store =
-          is_backward && is_final_factor ? detail::complex_conjugate::APPLIED : detail::complex_conjugate::NOT_APPLIED;
-      const auto apply_scale = is_final_factor && is_final_dim ? detail::apply_scale_factor::APPLIED
-                                                               : detail::apply_scale_factor::NOT_APPLIED;
+        set_global_spec_constants(in_bundle, multi_plan.global_constants, multi_plan.levels[i],
+                                  multi_plan.level_constants[i]);
+        set_shared_spec_constants<Scalar>(in_bundle, multi_plan.shared_constants[i]);
 
-      Idx length{};
-      IdxGlobal forward_stride{};
-      IdxGlobal backward_stride{};
-      IdxGlobal forward_distance{};
-      IdxGlobal backward_distance{};
+        std::vector<Idx> factors;
+        if (multi_plan.levels[i] == detail::level::WORKITEM) {
+          factors.push_back(multi_plan.level_constants[i].workitem.fft_size);
+        } else if (multi_plan.levels[i] == detail::level::SUBGROUP) {
+          factors.push_back(multi_plan.level_constants[i].subgroup.factor_wi);
+          factors.push_back(multi_plan.level_constants[i].subgroup.factor_sg);
+        }
+        if (multi_plan.levels[i] == detail::level::WORKGROUP) {
+          factors.push_back(multi_plan.level_constants[i].workgroup.fft_size);
+        }
 
-      if (is_global) {
-        length = std::accumulate(factors.begin(), factors.end(), Idx(1), std::multiplies<Idx>());
-
-        remaining_factors_prod /= length;
-        forward_stride = remaining_factors_prod;
-        backward_stride = remaining_factors_prod;
-        forward_distance = is_final_factor ? length : 1;
-        backward_distance = is_final_factor ? length : 1;
-
-      } else {
-        length = static_cast<Idx>(params.lengths[dimension_num]);
-        forward_stride = static_cast<IdxGlobal>(params.forward_strides[dimension_num]);
-        backward_stride = static_cast<IdxGlobal>(params.backward_strides[dimension_num]);
-        if (is_multi_dim) {
-          if (is_final_dim) {
-            forward_distance = length;
-            backward_distance = length;
-          } else {
-            forward_distance = 1;
-            backward_distance = 1;
-          }
-        } else {
-          forward_distance = static_cast<IdxGlobal>(params.forward_distance);
-          backward_distance = static_cast<IdxGlobal>(params.backward_distance);
+        try {
+          PORTFFT_LOG_TRACE("Building kernel bundle with subgroup size", SubgroupSize);
+          result.emplace_back(sycl::build(in_bundle), factors, params.lengths[dim], SubgroupSize,
+                              PORTFFT_SGS_IN_WG, std::shared_ptr<Scalar>(), multi_plan.levels[i]);
+          PORTFFT_LOG_TRACE("Kernel bundle build complete.");
+        } catch (std::exception& e) {
+          PORTFFT_LOG_WARNING("Build for subgroup size", SubgroupSize, "failed with message:\n", e.what());
+          return std::nullopt;
         }
       }
+      return result;
+    } else {
+      single_kernel_implementation_plan& single_plan = plan.plan.single;
+      auto in_bundle = sycl::get_kernel_bundle<sycl::bundle_state::input>(queue.get_context(), single_plan.kernel_ids);
 
-      const IdxGlobal input_stride = compute_direction == direction::FORWARD ? forward_stride : backward_stride;
-      const IdxGlobal output_stride = compute_direction == direction::FORWARD ? backward_stride : forward_stride;
-      const IdxGlobal input_distance = compute_direction == direction::FORWARD ? forward_distance : backward_distance;
-      const IdxGlobal output_distance = compute_direction == direction::FORWARD ? backward_distance : forward_distance;
+      std::vector<Idx> factors;
+      if (single_plan.level == level::WORKITEM) {
+        set_workitem_spec_constants(in_bundle, single_plan.constants.workitem);
+        factors.push_back(single_plan.constants.workitem.fft_size);
+      } else if (single_plan.level == level::SUBGROUP) {
+        set_subgroup_spec_constants(in_bundle, single_plan.constants.subgroup);
+        factors.push_back(single_plan.constants.subgroup.factor_wi);
+        factors.push_back(single_plan.constants.subgroup.factor_sg);
 
-      auto in_bundle = sycl::get_kernel_bundle<sycl::bundle_state::input>(queue.get_context(), ids);
+      } else if (single_plan.level == level::WORKGROUP) {
+        set_workgroup_spec_constants(in_bundle, single_plan.constants.workgroup);
+        factors.push_back(single_plan.constants.workgroup.fft_size);
+      }
+      set_shared_spec_constants<Scalar>(in_bundle, single_plan.shared_constants);
 
-      set_spec_constants(top_level, in_bundle, length, factors, detail::elementwise_multiply::NOT_APPLIED,
-                         multiply_on_store, apply_scale, level, conjugate_on_load, conjugate_on_store, scale_factor,
-                         input_stride, output_stride, input_distance, output_distance, static_cast<Idx>(counter),
-                         static_cast<Idx>(prepared_vec.size()));
       try {
         PORTFFT_LOG_TRACE("Building kernel bundle with subgroup size", SubgroupSize);
-        result.emplace_back(sycl::build(in_bundle), factors, params.lengths[dimension_num], SubgroupSize,
-                            PORTFFT_SGS_IN_WG, std::shared_ptr<Scalar>(), level);
+        kernel_data_struct data_struct(sycl::build(in_bundle), factors, params.lengths[dim], SubgroupSize,
+                                       PORTFFT_SGS_IN_WG, std::shared_ptr<Scalar>(), single_plan.level);
         PORTFFT_LOG_TRACE("Kernel bundle build complete.");
+        return {data_struct};
       } catch (std::exception& e) {
         PORTFFT_LOG_WARNING("Build for subgroup size", SubgroupSize, "failed with message:\n", e.what());
         return std::nullopt;
       }
-      counter++;
     }
-    return result;
   }
 
   /**
@@ -557,21 +560,24 @@ class committed_descriptor_impl {
   dimension_struct build_w_spec_const(std::size_t dimension_num) {
     PORTFFT_LOG_FUNCTION_ENTRY();
     if (std::count(supported_sg_sizes.begin(), supported_sg_sizes.end(), SubgroupSize)) {
-      auto [top_level, prepared_vec] = prepare_implementation<SubgroupSize>(dimension_num);
+      implementation_plan plan = prepare_implementation<SubgroupSize>(dimension_num);
       bool is_compatible = true;
-      for (auto [level, ids, factors] : prepared_vec) {
-        is_compatible = is_compatible && sycl::is_compatible(ids, dev);
-        if (!is_compatible) {
-          break;
+      if (plan.is_multi_level){
+        for (auto ids : plan.plan.multi.kernel_ids) {
+          is_compatible = is_compatible && sycl::is_compatible(ids, dev);
+          if (!is_compatible) {
+            break;
+          }
         }
+      } else {
+        is_compatible = sycl::is_compatible(plan.plan.single.kernel_ids, dev);
       }
 
       if (is_compatible) {
-        auto forward_kernels =
-            set_spec_constants_driver<SubgroupSize>(top_level, prepared_vec, direction::FORWARD, dimension_num);
-        auto backward_kernels =
-            set_spec_constants_driver<SubgroupSize>(top_level, prepared_vec, direction::BACKWARD, dimension_num);
+        auto forward_kernels = set_spec_constants_driver<SubgroupSize>(plan, dimension_num);
+        auto backward_kernels = set_spec_constants_driver<SubgroupSize>(plan, dimension_num);
         if (forward_kernels.has_value() && backward_kernels.has_value()) {
+          detail::level top_level = plan.is_multi_level ? level::GLOBAL : plan.plan.single.level;
           return {forward_kernels.value(), backward_kernels.value(), top_level, params.lengths[dimension_num],
                   SubgroupSize};
         }
@@ -647,13 +653,8 @@ class committed_descriptor_impl {
         auto in_bundle = sycl::get_kernel_bundle<sycl::bundle_state::input>(queue.get_context(),
                                                                             detail::get_transpose_kernel_ids<Scalar>());
         PORTFFT_LOG_TRACE("Setting specialization constants for transpose kernel", i);
-        PORTFFT_LOG_TRACE("SpecConstComplexStorage:", params.complex_storage);
-        in_bundle.template set_specialization_constant<detail::SpecConstComplexStorage>(params.complex_storage);
-        PORTFFT_LOG_TRACE("GlobalSpecConstLevelNum:", i);
-        in_bundle.template set_specialization_constant<detail::GlobalSpecConstLevelNum>(static_cast<Idx>(i));
-        PORTFFT_LOG_TRACE("GlobalSpecConstNumFactors:", factors.size());
-        in_bundle.template set_specialization_constant<detail::GlobalSpecConstNumFactors>(
-            static_cast<Idx>(factors.size()));
+        set_transpose_spec_constants(in_bundle, transpose_spec_constants{params.complex_storage, i, factors.size()});
+
         dimensions.at(global_dimension)
             .transpose_kernels.emplace_back(
                 sycl::build(in_bundle),
@@ -704,11 +705,7 @@ class committed_descriptor_impl {
             auto in_bundle = sycl::get_kernel_bundle<sycl::bundle_state::input>(
                 queue.get_context(), detail::get_transpose_kernel_ids<Scalar>());
             PORTFFT_LOG_TRACE("Setting specilization constants for transpose kernel", j);
-            PORTFFT_LOG_TRACE("GlobalSpecConstLevelNum:", i);
-            in_bundle.template set_specialization_constant<detail::GlobalSpecConstLevelNum>(static_cast<Idx>(i));
-            PORTFFT_LOG_TRACE("GlobalSpecConstNumFactors:", factors.size());
-            in_bundle.template set_specialization_constant<detail::GlobalSpecConstNumFactors>(
-                static_cast<Idx>(factors.size()));
+            set_transpose_spec_constants(in_bundle, transpose_spec_constants{params.complex_storage, i, factors.size()});
             dimensions.at(i).transpose_kernels.emplace_back(
                 sycl::build(in_bundle),
                 std::vector<Idx>{static_cast<Idx>(factors.at(j)), static_cast<Idx>(sub_batches.at(j))}, 1, 1, 1,
